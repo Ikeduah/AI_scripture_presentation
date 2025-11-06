@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 import OpenAI from "openai";
-import { getCachedVerse, cacheVerse, getCacheKey } from "./cache";
+import { getCachedVerse, cacheVerse, getCacheKey } from "../../lib/cache";
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 

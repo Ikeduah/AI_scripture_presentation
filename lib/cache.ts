@@ -152,3 +152,4 @@ export async function isVerseCached(book: string, chapter: number, verse: number
   const key = getCacheKey(book, chapter, verse);
   return key in cache && !!cache[key].text && cache[key].text !== "Verse not found.";
 }
+
