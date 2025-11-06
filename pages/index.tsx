@@ -117,7 +117,16 @@ export default function HomePage() {
           return;
         }
         
-        const verse: VerseData | null = JSON.parse(cleanedText);
+        // Parse JSON with error handling
+        let verse: VerseData | null = null;
+        try {
+          verse = JSON.parse(cleanedText);
+        } catch (parseError: any) {
+          console.error("[fetchVerse] JSON parse error:", parseError);
+          console.error("[fetchVerse] Attempted to parse:", cleanedText.substring(0, 100));
+          setStatus("Error: Invalid response from server");
+          return;
+        }
         
         // Check if verse is null or invalid
         if (!verse || verse.book === "Unknown" || !verse.book || !verse.text) {

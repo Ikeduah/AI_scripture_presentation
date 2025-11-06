@@ -49,9 +49,30 @@ function parseLLMResponse(response: string): any {
       return null;
     }
 
-    return JSON.parse(cleaned);
+    // Try to extract JSON from text that might contain extra words
+    // Look for JSON object pattern: { ... }
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      cleaned = jsonMatch[0];
+    }
+
+    // Try parsing
+    const parsed = JSON.parse(cleaned);
+    return parsed;
   } catch (error) {
     console.error("[API] Error parsing LLM response:", error);
+    console.error("[API] Response was:", response.substring(0, 200));
+    
+    // Try to extract JSON object even if wrapped in text
+    try {
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]);
+      }
+    } catch (secondTry) {
+      // Ignore
+    }
+    
     return null;
   }
 }
@@ -70,58 +91,54 @@ export default async function handler(
 
     console.log("[API] Processing transcript:", transcript);
 
-    // Step 1: Try to extract verse reference from transcript
+    // Step 1: Try to extract verse reference from transcript and check cache
     const verseRef = tryExtractVerseReference(transcript);
     
     if (verseRef) {
       console.log("[API] Extracted verse reference:", verseRef);
+      console.log("[API] Checking cache for:", getCacheKey(verseRef.book, verseRef.chapter, verseRef.verse));
       // Check cache first
       const cachedVerse = await getCachedVerse(verseRef.book, verseRef.chapter, verseRef.verse);
       if (cachedVerse) {
-        console.log("[API] Found in cache:", getCacheKey(verseRef.book, verseRef.chapter, verseRef.verse));
+        console.log("[API] ✅ Found in cache, returning cached verse");
         return res.status(200).send(JSON.stringify(cachedVerse));
       }
+      console.log("[API] ❌ Not in cache, will call LLM");
+    } else {
+      console.log("[API] Could not extract verse reference from transcript, will call LLM");
     }
 
     // Step 2: If not in cache, call LLM
-    console.log("[API] Verse not in cache, calling LLM...");
-    const prompt = `
-    You are a Bible assistant. Extract the exact verse being referenced from the following transcript: "${transcript}".
-    Reply with exact Bible verse (book, chapter, verse) and return it in JSON format:
-    {
-        "book": "...",
-        "chapter": ...,
-        "verse": ...,
-        "text": "...",
-        "translation": "..."
-    }
-    If it is not a Bible quote, return null.`;
+    console.log("[API] Calling LLM to extract verse...");
+    const prompt = `Extract Bible verse from: "${transcript}". Return ONLY JSON: {"book":"...","chapter":...,"verse":...,"text":"...","translation":"..."} or null if not a Bible quote.`;
 
     const response = await client.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-3.5-turbo",
       messages: [{"role": "user", "content": prompt}],
+      temperature: 0,
     });
 
     const output = response.choices[0].message.content?.trim() || "Unknown";
     const verseData = parseLLMResponse(output);
 
     if (!verseData || verseData.book === "Unknown") {
-      console.log("[API] LLM did not extract valid verse");
-      // Return the raw output as-is for backward compatibility
-      return res.status(200).send(output);
+      console.log("[API] LLM did not extract valid verse, returning null JSON");
+      // Always return valid JSON, even when no verse is found
+      return res.status(200).send(JSON.stringify(null));
     }
 
     // Step 3: Check cache again with the actual verse reference from LLM
     const cacheKey = getCacheKey(verseData.book, verseData.chapter, verseData.verse);
+    console.log("[API] Checking cache again with LLM result:", cacheKey);
     const cachedVerse = await getCachedVerse(verseData.book, verseData.chapter, verseData.verse);
     
     if (cachedVerse) {
-      console.log("[API] Found in cache after LLM:", cacheKey);
+      console.log("[API] ✅ Found in cache after LLM, returning cached verse");
       return res.status(200).send(JSON.stringify(cachedVerse));
     }
 
     // Step 4: Save to cache and return
-    console.log("[API] Caching new verse:", cacheKey);
+    console.log("[API] 💾 Caching new verse:", cacheKey);
     await cacheVerse(verseData);
     return res.status(200).send(JSON.stringify(verseData));
   } catch (err: any) {
