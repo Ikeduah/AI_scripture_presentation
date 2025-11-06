@@ -110,7 +110,18 @@ export default async function handler(
 
     // Step 2: If not in cache, call LLM
     console.log("[API] Calling LLM to extract verse...");
-    const prompt = `Extract Bible verse from: "${transcript}". Return ONLY JSON: {"book":"...","chapter":...,"verse":...,"text":"...","translation":"..."} or null if not a Bible quote.`;
+    const prompt = `You are a Bible expert. Extract the Bible verse reference from this text (may be partial quote, summary, or paraphrase): "${transcript}"
+
+Identify the book, chapter, and verse number. Even if the quote is incomplete or paraphrased, find the original verse reference.
+
+Return ONLY valid JSON with no extra text:
+{"book":"BookName","chapter":number,"verse":number,"text":"full verse text","translation":"translation name"} 
+or null if not a Bible reference.
+
+Examples:
+- "For God so loved" → John 3:16
+- "The Lord is my shepherd" → Psalm 23:1
+- "Love is patient" → 1 Corinthians 13:4`;
 
     const response = await client.chat.completions.create({
       model: "gpt-3.5-turbo",

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
+import { getCachedVerse, cacheVerse, getCacheKey } from "../lib/clientCache";
 
 interface VerseData {
   book: string;
@@ -38,6 +39,9 @@ export default function HomePage() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const dataArrayRef = useRef<Uint8Array | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const autoRestartTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const shouldAutoRestartRef = useRef<boolean>(true);
+  const isListeningRef = useRef<boolean>(false);
 
   // -----------------------------
   // List microphones
@@ -63,6 +67,29 @@ export default function HomePage() {
   useEffect(() => { listMics(); }, []);
 
   // -----------------------------
+  // Extract verse reference from transcript (same logic as server)
+  // -----------------------------
+  function tryExtractVerseReference(transcript: string): { book: string; chapter: number; verse: number } | null {
+    const patterns = [
+      /([1-3]?\s*[A-Za-z]+)\s+(\d+):(\d+)/i,
+      /([1-3]?\s*[A-Za-z]+)\s+(\d+)\s+(\d+)/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = transcript.match(pattern);
+      if (match) {
+        const book = match[1].trim();
+        const chapter = parseInt(match[2], 10);
+        const verse = parseInt(match[3], 10);
+        if (book && chapter && verse) {
+          return { book, chapter, verse };
+        }
+      }
+    }
+    return null;
+  }
+
+  // -----------------------------
   // Fetch LLM API whenever transcript changes
   // -----------------------------
   useEffect(() => {
@@ -75,6 +102,24 @@ export default function HomePage() {
     const controller = new AbortController();
 
     const fetchVerse = async () => {
+      // Step 1: Try to extract verse reference and check client cache
+      const verseRef = tryExtractVerseReference(transcript);
+      if (verseRef) {
+        console.log("[fetchVerse] Extracted verse reference:", verseRef);
+        const cachedVerse = getCachedVerse(verseRef.book, verseRef.chapter, verseRef.verse);
+        if (cachedVerse) {
+          console.log("[fetchVerse] ✅ Found in client cache, returning immediately");
+          const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          setOutput(prev => {
+            const newOutput = [{ ...cachedVerse, translation: `${timestamp}${cachedVerse.translation ? " | " + cachedVerse.translation : ""}` }, ...prev];
+            return newOutput;
+          });
+          setStatus("Idle");
+          return; // Exit early, no API call needed
+        }
+        console.log("[fetchVerse] ❌ Not in client cache, will call API");
+      }
+
       setStatus("Fetching...");
       
       // Log the transcript being sent to API
@@ -139,6 +184,18 @@ export default function HomePage() {
         console.log("[API RESPONSE] Parsed verse data:");
         console.log(JSON.stringify(verse, null, 2));
         console.log("═══════════════════════════════════════════════════════");
+        
+        // Check client cache again with the actual verse reference from API
+        const cacheKey = getCacheKey(verse.book, verse.chapter, verse.verse);
+        const cachedVerse = getCachedVerse(verse.book, verse.chapter, verse.verse);
+        if (cachedVerse) {
+          console.log("[fetchVerse] ✅ Found in client cache after API call, using cached version");
+          verse = cachedVerse; // Use cached version (might have better formatting)
+        } else {
+          // Cache the verse on client side for future use
+          cacheVerse(verse);
+        }
+        
         const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
         setOutput(prev => {
           const newOutput = [{ ...verse, translation: `${timestamp}${verse.translation ? " | " + verse.translation : ""}` }, ...prev];
@@ -183,12 +240,33 @@ export default function HomePage() {
     analyserRef.current = analyser;
     dataArrayRef.current = dataArray;
 
+    const AUDIO_THRESHOLD = 0.15; // Threshold for detecting speech (15% of max)
+    const RESTART_DELAY = 500; // Wait 500ms before restarting
+
     const updateLevel = () => {
       if (!analyserRef.current || !dataArrayRef.current) return;
       analyserRef.current.getByteFrequencyData(dataArrayRef.current as Uint8Array<ArrayBuffer>);
       const sum = dataArrayRef.current.reduce((acc, val) => acc + val * val, 0);
       const rms = Math.sqrt(sum / dataArrayRef.current.length);
-      setAudioLevel(Math.min(rms / 128, 1));
+      const level = Math.min(rms / 128, 1);
+      setAudioLevel(level);
+      
+      // Check if we should auto-restart recognition
+      if (!isListeningRef.current && shouldAutoRestartRef.current && level > AUDIO_THRESHOLD) {
+        console.log("[startAudioMeter] Audio detected, scheduling restart. Level:", level);
+        // Clear any existing timeout
+        if (autoRestartTimeoutRef.current) {
+          clearTimeout(autoRestartTimeoutRef.current);
+        }
+        // Restart after a short delay to avoid rapid restarts
+        autoRestartTimeoutRef.current = setTimeout(() => {
+          if (!isListeningRef.current && shouldAutoRestartRef.current && streamRef.current) {
+            console.log("[startAudioMeter] Auto-restarting speech recognition");
+            startListening();
+          }
+        }, RESTART_DELAY);
+      }
+      
       animationFrameRef.current = requestAnimationFrame(updateLevel);
     };
     updateLevel();
@@ -252,12 +330,31 @@ export default function HomePage() {
       };
       rec.onend = () => {
         console.log("[startListening] Speech recognition ended");
-        setStatus("Stopped");
+        isListeningRef.current = false;
+        setIsListening(false);
+        // Don't set status to "Stopped" if we should auto-restart
+        // The audio meter will check and restart if needed
+        if (shouldAutoRestartRef.current) {
+          setStatus("Idle (will restart on audio)");
+          // Check audio level immediately and restart if needed
+          if (audioLevel > 0.15) {
+            console.log("[startListening] Audio detected on end, restarting immediately");
+            setTimeout(() => {
+              if (shouldAutoRestartRef.current && streamRef.current && !isListeningRef.current) {
+                startListening();
+              }
+            }, 300);
+          }
+        } else {
+          setStatus("Stopped");
+        }
       };
 
       rec.start();
       console.log("[startListening] Speech recognition started");
       recRef.current = rec;
+      shouldAutoRestartRef.current = true; // Enable auto-restart
+      isListeningRef.current = true;
       setIsListening(true);
       setStatus("Listening on selected mic...");
     } catch (err) {
@@ -269,6 +366,12 @@ export default function HomePage() {
 
   const stopListening = () => {
     console.log("[stopListening] Stopping speech recognition");
+    shouldAutoRestartRef.current = false; // Disable auto-restart when manually stopped
+    isListeningRef.current = false;
+    if (autoRestartTimeoutRef.current) {
+      clearTimeout(autoRestartTimeoutRef.current);
+      autoRestartTimeoutRef.current = null;
+    }
     recRef.current?.stop(); 
     recRef.current = null;
     streamRef.current?.getTracks().forEach(t => {
