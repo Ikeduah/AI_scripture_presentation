@@ -38,3 +38,15 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/pages/building-your-application/deploying) for more details.
+
+## Vercel Blob Setup
+
+This application uses Vercel Blob for persistent storage of feedback data. To set up Vercel Blob, see [VERCEL_BLOB_SETUP.md](./VERCEL_BLOB_SETUP.md) for detailed instructions.
+
+**Quick Setup:**
+1. Go to your Vercel project dashboard
+2. Navigate to **Storage** → **Create Database** → Select **Blob**
+3. Create and link the blob store to your project
+4. Redeploy your application
+
+The feedback endpoint will work without Blob (with logging only), but feedback won't persist until Blob is configured.

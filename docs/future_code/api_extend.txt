@@ -1,0 +1,24 @@
+from fastapi import FastAPI, Request
+from datetime import datetime
+import json, os
+
+app = FastAPI()
+
+TRANSCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "data", "transcripts")
+os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
+
+@app.post("/api/log_transcript")
+async def log_transcript(request: Request):
+    data = await request.json()
+    # Example payload: { "speaker": "Pastor Isaac", "recognized_text": "Let's open to John 3:16", "detected_reference": "John 3:16" }
+
+    timestamp = datetime.utcnow().isoformat()
+    data["timestamp"] = timestamp
+
+    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    file_path = os.path.join(TRANSCRIPTS_DIR, f"transcript_{date_str}.jsonl")
+
+    with open(file_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(data) + "\n")
+
+    return {"status": "ok", "logged_to": file_path}

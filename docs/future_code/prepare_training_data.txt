@@ -1,0 +1,49 @@
+🧠 Step 3. Automatically Generate Fine-Tuning Data from Transcripts
+
+We’ll add a script that converts logged transcripts into clean prompt → completion pairs for fine-tuning.
+
+
+import os, json
+from datetime import datetime
+
+TRANSCRIPTS_DIR = os.path.join(os.path.dirname(__file__), "../data/transcripts")
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "../data/training")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+def prepare_training_data():
+    dataset = []
+    for file in os.listdir(TRANSCRIPTS_DIR):
+        if file.endswith(".jsonl"):
+            with open(os.path.join(TRANSCRIPTS_DIR, file), "r", encoding="utf-8") as f:
+                for line in f:
+                    record = json.loads(line)
+                    if "recognized_text" in record and "detected_reference" in record:
+                        dataset.append({
+                            "prompt": record["recognized_text"],
+                            "completion": f"Reference: {record['detected_reference']}"
+                        })
+
+    output_path = os.path.join(OUTPUT_DIR, f"fine_tune_dataset_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jsonl")
+    with open(output_path, "w", encoding="utf-8") as f:
+        for item in dataset:
+            f.write(json.dumps(item) + "\n")
+
+    print(f"✅ Fine-tune dataset created: {output_path} ({len(dataset)} samples)")
+
+if __name__ == "__main__":
+    prepare_training_data()
+
+
+
+
+
+
+
+✅ What this does:
+
+Reads all transcript logs.
+
+Creates a fine_tune_dataset_YYYYMMDD.jsonl.
+
+Perfect format for OpenAI fine-tuning (prompt → completion pairs).
+

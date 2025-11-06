@@ -1,0 +1,15 @@
+const logTranscript = async (recognizedText: string, detectedReference: string) => {
+  try {
+    await fetch("http://localhost:8000/api/log_transcript", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        speaker: "Pastor Isaac",
+        recognized_text: recognizedText,
+        detected_reference: detectedReference,
+      }),
+    });
+  } catch (err) {
+    console.error("Failed to log transcript:", err);
+  }
+};
