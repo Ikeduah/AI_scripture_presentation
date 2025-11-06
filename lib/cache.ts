@@ -87,6 +87,7 @@ export async function saveCache(cache: BibleCache): Promise<void> {
         access: "public",
         contentType: "application/json",
         addRandomSuffix: false, // Overwrite existing file
+        allowOverwrite: true, // Required to allow overwriting existing files
       });
 
       console.log("[cache] Saved to Vercel Blob");

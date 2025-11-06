@@ -90,6 +90,7 @@ export default async function handler(
         access: "public", // Public access (URLs are not exposed unless needed)
         contentType: "application/json",
         addRandomSuffix: false, // Overwrite existing file
+        allowOverwrite: true, // Required to allow overwriting existing files
       });
 
       console.log("[feedback] Saved to Vercel Blob:", feedbackEntry);

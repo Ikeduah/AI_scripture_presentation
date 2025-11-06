@@ -110,14 +110,29 @@ export default function HomePage() {
           .trim();                      // Remove any extra whitespace
         console.log("[API RESPONSE] Cleaned text (after removing markdown):", cleanedText);
         
-        const verse: VerseData = JSON.parse(cleanedText);
+        // Handle null or invalid responses
+        if (cleanedText.toLowerCase() === "null" || cleanedText === "" || cleanedText === "Unknown") {
+          console.log("[fetchVerse] API returned null or invalid response");
+          setStatus("No verse found");
+          return;
+        }
+        
+        const verse: VerseData | null = JSON.parse(cleanedText);
+        
+        // Check if verse is null or invalid
+        if (!verse || verse.book === "Unknown" || !verse.book || !verse.text) {
+          console.log("[fetchVerse] Invalid verse data received:", verse);
+          setStatus("No verse found");
+          return;
+        }
+        
         console.log("═══════════════════════════════════════════════════════");
         console.log("[API RESPONSE] Parsed verse data:");
         console.log(JSON.stringify(verse, null, 2));
         console.log("═══════════════════════════════════════════════════════");
         const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
         setOutput(prev => {
-          const newOutput = [{ ...verse,translation : `${timestamp}${verse.translation ? " | " + verse.translation : ""}` }, ...prev];
+          const newOutput = [{ ...verse, translation: `${timestamp}${verse.translation ? " | " + verse.translation : ""}` }, ...prev];
           console.log("[fetchVerse] Updated output array, count:", newOutput.length);
           return newOutput;
         });
