@@ -1,0 +1,177 @@
+export type LayoutType =
+  | "one-line"
+  | "two-line"
+  | "three-line"
+  | "four-line"
+  | "five-line"
+  | "six-line";
+
+export type TemplateType = "text" | "image" | "video";
+
+// Define AI Provider and Model Types
+export type AIProviderType = "openrouter" | "groq";
+
+export const OPENROUTER_MODELS = [
+  "anthropic/claude-3.5-sonnet",
+  "anthropic/claude-3.5-haiku",
+  "meta-llama/llama-3.1-70b-instruct",
+  "meta-llama/llama-3.1-8b-instruct",
+  "google/gemini-2.5-flash",
+  "google/gemini-2.0-flash-exp:free",
+  "openai/gpt-4o",
+  "openai/gpt-4o-mini",
+  "deepseek/deepseek-r1",
+] as const;
+export type OpenRouterModelType = (typeof OPENROUTER_MODELS)[number];
+
+export const GROQ_MODELS = [
+  "llama-3.3-70b-versatile",
+  "llama-3.1-8b-instant",
+  "llama-3.1-70b-versatile",
+  "mixtral-8x7b-32768",
+  "gemma2-9b-it",
+] as const;
+export type GroqModelType = (typeof GROQ_MODELS)[number];
+
+/** Recommended default AI model per provider (for templates and app default). */
+export const RECOMMENDED_DEFAULT_AI_MODEL: Record<AIProviderType, string> = {
+  openrouter: "anthropic/claude-3.5-haiku", // Fast and cheap
+  groq: "llama-3.3-70b-versatile",
+};
+
+/** Default Groq models for each AI Model Settings feature when Groq is the only provider (first-time setup). */
+export const GROQ_FIRST_TIME_DEFAULTS = {
+  defaultModel: "llama-3.3-70b-versatile" as const,
+  spellCheck: "llama-3.1-8b-instant" as const,
+  timerImageUpload: "llama-3.3-70b-versatile" as const,
+  globalAssistant: "llama-3.3-70b-versatile" as const,
+};
+
+/** Per-line metadata for Live Slides restore (bullet/numbered list formatting on the notepad). */
+export interface LiveSlidesItemMeta {
+  isSubItem: boolean;
+  listNumber?: number; // 1-based, for numbered lists
+}
+
+export interface Slide {
+  id: string;
+  text: string; // Can be multi-line, actual rendering will depend on layout
+  layout: LayoutType;
+  order: number; // To maintain order within a playlist item
+  isAutoScripture?: boolean; // True if this slide was auto-generated from detected scripture reference
+  timerSessionIndex?: number; // Index of schedule session to trigger when going live (from Stage Assist timer tab)
+  proPresenterActivation?: {
+    presentationUuid: string;
+    slideIndex: number;
+    presentationName?: string;
+    activationClicks?: number; // Per-slide override for activation clicks
+    takeOffClicks?: number; // Per-slide override for take off clicks
+  }; // Per-slide override for ProPresenter presentation activation
+  /**
+   * Live Slides: list style so we can restore bullet/numbered format on the notepad.
+   * Set when converting from notepad raw text (parsed from • or 1. prefixes).
+   */
+  liveSlidesListStyle?: "bullet" | "numbered" | null;
+  /** One entry per line in slide.text; used by buildRawTextFromSlides to output \t• or 1. etc. */
+  liveSlidesItemMeta?: LiveSlidesItemMeta[];
+}
+
+export interface PlaylistItem {
+  // This seems to represent a collection of slides generated from one import/template application
+  id: string;
+  title: string; // Derived from import or manually set
+  templateName: string;
+  templateColor: string; // From the template used
+  slides: Slide[];
+  /**
+   * Live Slides integration (optional):
+   * When set, this playlist item is backed by a Live Slides session and can update in real-time.
+   */
+  liveSlidesSessionId?: string;
+  liveSlidesLinked?: boolean; // default true when liveSlidesSessionId is set
+  /**
+   * Persisted copy of the session's raw_text so sessions can be resumed after app restart.
+   * This is the canonical serialization for Live Slides (blank line = new slide).
+   */
+  liveSlidesCachedRawText?: string;
+  /**
+   * Default ProPresenter presentation activation config for all slides in this item.
+   * Individual slides can override this with their own proPresenterActivation property.
+   */
+  defaultProPresenterActivation?: {
+    presentationUuid: string;
+    slideIndex: number;
+    presentationName?: string;
+    activationClicks?: number; // Per-item override for activation clicks
+    takeOffClicks?: number; // Per-item override for take off clicks
+  };
+}
+
+export interface Playlist {
+  id: string;
+  name: string;
+  items: PlaylistItem[]; // A playlist contains multiple "PlaylistItems" which are groups of slides
+}
+
+export interface Template {
+  id: string;
+  name: string;
+  icon?: string;
+  color: string;
+  type: TemplateType;
+  processingType: "simple" | "regex" | "javascript" | "ai";
+  logic: string; // Could be a path to a script, regex, or other rules
+  availableLayouts: LayoutType[];
+  aiPrompt?: string; // User-defined prompt for AI processing
+  aiProvider?: AIProviderType; // Specify AI provider for this template
+  aiModel?: OpenRouterModelType | GroqModelType | string; // Specify AI model for this template (string for flexibility if new models added)
+  processWithAI?: boolean; // Whether to process text using AI for this template
+  outputPath: string;
+  outputFileNamePrefix: string;
+  // Auto-scripture output mapping
+  scriptureReferenceFileIndex?: number; // Which file index (1-6) to write scripture reference to
+  scriptureTextFileIndex?: number; // Which file index (1-6) to write scripture text to
+  appendTranslationToReference?: boolean; // Append translation short name to reference output
+  // ProPresenter activation settings
+  proPresenterActivation?: {
+    presentationUuid: string;
+    slideIndex: number;
+    presentationName?: string;
+  }; // ProPresenter presentation activation config for this template
+  proPresenterConnectionIds?: string[]; // Specific ProPresenter connection IDs to trigger on (empty = all enabled)
+  proPresenterActivationClicks?: number; // Number of times to trigger on "Go Live" (default: 1) - for animations
+  proPresenterTakeOffClicks?: number; // Number of times to trigger on "Take Off" (default: 1) - for exit animations
+  clearTextAfterLive?: boolean; // Whether to clear text files after going live
+  clearTextDelay?: number; // Delay in milliseconds before clearing text (default: 0)
+  autoLoadBibleVerses?: boolean; // Whether to auto-load Bible verses (KJV) by default when importing with this template
+}
+
+export interface AIModelSetting {
+  provider: AIProviderType;
+  model: string;
+}
+
+export interface AppSettings {
+  theme: "light" | "dark";
+  openRouterConfig?: AIServiceConfig; // Stores API key for OpenRouter
+  groqConfig?: AIServiceConfig; // Stores API key for Groq
+  defaultAIProvider?: AIProvider; // User's preferred default AI if multiple are configured
+  defaultAIModel?: string; // Model for the default AI provider
+  // AI Model settings for specific features
+  spellCheckModel?: AIModelSetting; // Provider and model for spell checking
+  timerAssistantModel?: AIModelSetting; // Provider and model for timer AI assistant
+  globalAssistantModel?: AIModelSetting; // Provider and model for global AI chat assistant
+  // Other global settings can be added here
+}
+
+export interface ProPresenterData {
+  liveSlideText: string;
+  // Potentially other fields ProPresenter needs
+}
+
+export type AIProvider = "openrouter" | "groq" | null;
+
+export interface AIServiceConfig {
+  // provider: AIProvider; // Redundant if keys are specific e.g. openRouterConfig
+  apiKey: string;
+}

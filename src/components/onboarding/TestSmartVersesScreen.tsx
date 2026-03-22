@@ -1,0 +1,746 @@
+/**
+ * Screen 9: Test Smart Verses
+ */
+
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { FaCheck, FaPlay, FaStop } from "react-icons/fa";
+import type { DetectedBibleReference, KeyPoint, TranscriptionEngine, TranscriptionStatus, ModelLoadingProgress } from "@/lib/types/smartVerses";
+import {
+  createTranscriptionService,
+  ITranscriptionService,
+  loadSmartVersesSettings,
+} from "@/lib/services/transcriptionService";
+import { getAppSettings } from "@/lib/utils/aiConfig";
+import { BUILTIN_KJV_ID } from "@/lib/services/bibleLibraryService";
+import { detectAndLookupReferences, resetParseContext } from "@/lib/services/smartVersesBibleService";
+import {
+  analyzeTranscriptChunk,
+  resolveParaphrasedVerses,
+} from "@/lib/services/smartVersesAIService";
+import { analyzeTranscriptChunkOffline } from "@/lib/services/smartVersesOfflineParaphraseService";
+import "./onboarding.css";
+
+interface TestSmartVersesScreenProps {
+  transcriptionConfigured: boolean;
+  micConfigured: boolean;
+  transcriptionProvider?: TranscriptionEngine;
+  onNext: () => void;
+  onBack: () => void;
+  onSkip: () => void;
+}
+
+type TestMode = "scripture" | "paraphrase" | "keypoint";
+
+const transcriptLimit = 6;
+
+const TestSmartVersesScreen: React.FC<TestSmartVersesScreenProps> = ({
+  transcriptionConfigured,
+  micConfigured,
+  transcriptionProvider,
+  onNext,
+  onBack,
+  onSkip,
+}) => {
+  const [activeTest, setActiveTest] = useState<TestMode | null>(null);
+  const [transcriptionStatus, setTranscriptionStatus] =
+    useState<TranscriptionStatus>("idle");
+  const [interimTranscript, setInterimTranscript] = useState("");
+  const [transcriptLines, setTranscriptLines] = useState<string[]>([]);
+  const [scriptureResult, setScriptureResult] =
+    useState<DetectedBibleReference | null>(null);
+  const [paraphraseResult, setParaphraseResult] =
+    useState<DetectedBibleReference | null>(null);
+  const [keypointResult, setKeypointResult] = useState<KeyPoint | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [aiProviderAvailable, setAiProviderAvailable] = useState(false);
+  const [aiProviderLabel, setAiProviderLabel] = useState<string | null>(null);
+  const [modelLoadingProgress, setModelLoadingProgress] = useState<ModelLoadingProgress | null>(null);
+
+  const transcriptionServiceRef = useRef<ITranscriptionService | null>(null);
+  const activeTestRef = useRef<TestMode | null>(null);
+
+  const canTestScripture = transcriptionConfigured && micConfigured;
+
+  const updateProviderAvailability = useCallback((settings: ReturnType<typeof loadSmartVersesSettings>) => {
+    const appSettings = getAppSettings();
+    
+    // For paraphrase detection: if offline mode is selected, don't show AI provider
+    // For keypoint extraction: always check for default AI provider even if bibleSearchProvider is offline
+    // (keypoint extraction always requires AI, but can fall back to defaultAIProvider)
+    
+    // Determine the provider to use
+    let provider: string | undefined;
+    
+    if (settings.bibleSearchProvider && settings.bibleSearchProvider !== "offline") {
+      provider = settings.bibleSearchProvider;
+    } else if (settings.bibleSearchProvider === "offline") {
+      // Even if bibleSearchProvider is offline, check for default AI provider for keypoint extraction
+      provider = appSettings.defaultAIProvider ?? undefined;
+    } else {
+      provider = appSettings.defaultAIProvider ?? undefined;
+    }
+
+    const hasKey =
+      provider === "openrouter"
+        ? !!appSettings.openRouterConfig?.apiKey
+        : provider === "groq"
+        ? !!appSettings.groqConfig?.apiKey
+        : false;
+
+    // For paraphrase detection: if offline mode is enabled, don't show AI provider
+    // For keypoint extraction: show AI provider if available (even if bibleSearchProvider is offline)
+    if (settings.paraphraseDetectionMode === "offline") {
+      // Paraphrase detection uses offline mode, so don't show AI provider for paraphrase
+      // But still allow keypoint extraction if default AI provider is available
+      setAiProviderAvailable(hasKey);
+      setAiProviderLabel(hasKey && provider ? provider.toUpperCase() : null);
+    } else {
+      setAiProviderAvailable(hasKey);
+      setAiProviderLabel(provider ? provider.toUpperCase() : null);
+    }
+  }, []);
+
+  const stopTranscription = useCallback(async () => {
+    if (transcriptionServiceRef.current) {
+      try {
+        await transcriptionServiceRef.current.stopTranscription();
+      } finally {
+        transcriptionServiceRef.current.destroy?.();
+        transcriptionServiceRef.current = null;
+      }
+    }
+    activeTestRef.current = null;
+    setActiveTest(null);
+    setTranscriptionStatus("idle");
+    setModelLoadingProgress(null);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      void stopTranscription();
+    };
+  }, [stopTranscription]);
+
+  const appendTranscriptLine = useCallback((text: string) => {
+    setTranscriptLines((prev) => {
+      const next = [...prev, text];
+      return next.slice(-transcriptLimit);
+    });
+  }, []);
+
+  const startTest = useCallback(
+    async (mode: TestMode) => {
+      setError(null);
+      setInterimTranscript("");
+      setTranscriptLines([]);
+
+      await stopTranscription();
+      activeTestRef.current = mode;
+      setActiveTest(mode);
+
+      const settings = loadSmartVersesSettings();
+      // Note: Keypoint extraction can still work with defaultAIProvider even if bibleSearchProvider is "offline"
+      // The analysis logic (lines 230-233) will fall back to defaultAIProvider
+      if (mode === "scripture") {
+        setScriptureResult(null);
+        setParaphraseResult(null);
+        setKeypointResult(null);
+      }
+      if (mode === "paraphrase") {
+        setParaphraseResult(null);
+      }
+      if (mode === "keypoint") {
+        setKeypointResult(null);
+      }
+      if (transcriptionProvider) {
+        settings.transcriptionEngine = transcriptionProvider;
+      }
+      if (mode === "scripture") {
+        resetParseContext();
+      }
+
+      const service = createTranscriptionService(settings, {
+        onModelLoadingProgress: (progress) => {
+          setModelLoadingProgress(progress);
+        },
+        onInterimTranscript: (text) => {
+          if (activeTestRef.current) {
+            setInterimTranscript(text);
+          }
+        },
+        onFinalTranscript: async (text) => {
+          if (!activeTestRef.current) return;
+          setInterimTranscript("");
+          appendTranscriptLine(text);
+
+          const currentMode = activeTestRef.current;
+          if (!currentMode) return;
+
+          if (currentMode === "scripture") {
+            const translationId =
+              settings.defaultBibleTranslationId || BUILTIN_KJV_ID;
+            const refs = await detectAndLookupReferences(text, {
+              aggressiveSpeechNormalization: true,
+              translationId,
+            });
+            if (refs.length > 0 && activeTestRef.current === "scripture") {
+              setScriptureResult(refs[0]);
+              await stopTranscription();
+            }
+          }
+
+          if (currentMode === "paraphrase") {
+            const appSettings = getAppSettings();
+            const paraphraseMode = settings.paraphraseDetectionMode || "offline";
+            const aiProvider =
+              settings.bibleSearchProvider && settings.bibleSearchProvider !== "offline"
+                ? settings.bibleSearchProvider
+                : appSettings.defaultAIProvider ?? undefined;
+
+            const analysis =
+              paraphraseMode === "offline"
+                ? await analyzeTranscriptChunkOffline(text, {
+                    minConfidence: settings.paraphraseConfidenceThreshold,
+                    maxResults: 3,
+                    minWords: settings.aiMinWordCount,
+                  })
+                : await analyzeTranscriptChunk(
+                    text,
+                    appSettings,
+                    true,
+                    false,
+                    {
+                      overrideProvider: aiProvider,
+                      overrideModel: settings.bibleSearchModel,
+                      minWords: settings.aiMinWordCount,
+                    }
+                  );
+
+            if (!activeTestRef.current || activeTestRef.current !== "paraphrase") return;
+            if (analysis.paraphrasedVerses.length > 0) {
+              const translationId =
+                settings.defaultBibleTranslationId || BUILTIN_KJV_ID;
+              const resolved = await resolveParaphrasedVerses(
+                analysis.paraphrasedVerses,
+                translationId
+              );
+              if (resolved.length > 0 && activeTestRef.current === "paraphrase") {
+                setParaphraseResult(resolved[0]);
+                await stopTranscription();
+              }
+            }
+          }
+
+          if (currentMode === "keypoint") {
+            const appSettings = getAppSettings();
+            const aiProvider =
+              settings.bibleSearchProvider && settings.bibleSearchProvider !== "offline"
+                ? settings.bibleSearchProvider
+                : appSettings.defaultAIProvider ?? undefined;
+
+            const analysis = await analyzeTranscriptChunk(
+              text,
+              appSettings,
+              false,
+              true,
+              {
+                keyPointInstructions: settings.keyPointExtractionInstructions,
+                overrideProvider: aiProvider,
+                overrideModel: settings.bibleSearchModel,
+                minWords: settings.aiMinWordCount,
+              }
+            );
+            if (!activeTestRef.current || activeTestRef.current !== "keypoint") return;
+            if (analysis.keyPoints && analysis.keyPoints.length > 0) {
+              setKeypointResult(analysis.keyPoints[0]);
+              await stopTranscription();
+            }
+          }
+        },
+        onError: (err) => {
+          console.error("Smart Verses test error:", err);
+          setError(err.message);
+          void stopTranscription();
+        },
+        onStatusChange: (status) => {
+          setTranscriptionStatus(status);
+          // Clear loading progress when status changes to recording (model is ready)
+          if (status === "recording") {
+            setTimeout(() => {
+              setModelLoadingProgress(null);
+            }, 500);
+          }
+        },
+      });
+
+      service.setAudioCaptureMode?.(
+        settings.audioCaptureMode === "native" ? "native" : "webrtc"
+      );
+      if (settings.audioCaptureMode === "native") {
+        service.setNativeMicrophoneDeviceId?.(
+          settings.selectedNativeMicrophoneId || null
+        );
+      }
+      if (settings.selectedMicrophoneId) {
+        service.setMicrophone(settings.selectedMicrophoneId);
+      }
+
+      try {
+        await service.startTranscription();
+        transcriptionServiceRef.current = service;
+      } catch (err) {
+        console.error("Failed to start transcription:", err);
+        setError(
+          err instanceof Error ? err.message : "Failed to start transcription."
+        );
+        await stopTranscription();
+      }
+    },
+    [appendTranscriptLine, stopTranscription]
+  );
+
+  const stopActiveTest = async () => {
+    await stopTranscription();
+  };
+
+  const listening =
+    transcriptionStatus === "connecting" || transcriptionStatus === "recording";
+
+  const cardStyle: React.CSSProperties = {
+    padding: "var(--spacing-4)",
+    background: "var(--surface-2)",
+    borderRadius: "12px",
+    border: "1px solid var(--app-border-color)",
+  };
+
+  // Reload settings to ensure we have the latest values
+  const [latestSettings, setLatestSettings] = useState(() => {
+    const settings = loadSmartVersesSettings();
+    return settings;
+  });
+
+  useEffect(() => {
+    // Reload settings immediately on mount and periodically to catch changes
+    const refreshSettings = () => {
+      const freshSettings = loadSmartVersesSettings();
+      setLatestSettings(freshSettings);
+      updateProviderAvailability(freshSettings);
+    };
+    
+    refreshSettings();
+    const interval = setInterval(refreshSettings, 500);
+    return () => clearInterval(interval);
+  }, [updateProviderAvailability]);
+
+  return (
+    <div className="onboarding-screen">
+      <div className="onboarding-content">
+        <h1 className="onboarding-title">Test Smart Verses</h1>
+        <p className="onboarding-body">
+          We'll listen to your mic and run the same Smart Verses detection you
+          use during services.
+        </p>
+
+        {!canTestScripture ? (
+          <div className="onboarding-message onboarding-message-warning">
+            <strong>Testing is unavailable</strong>
+            <p style={{ margin: "8px 0 0", fontSize: "0.9rem" }}>
+              Smart Verses tests need transcription and microphone setup. You
+              can finish this in Settings later.
+            </p>
+          </div>
+        ) : (
+          <>
+            {/* Scripture Detection */}
+            <div style={cardStyle}>
+              <h3 style={{ margin: "0 0 var(--spacing-3)" }}>
+                Scripture detection test
+                {scriptureResult && (
+                  <FaCheck style={{ marginLeft: "8px", color: "var(--success)" }} />
+                )}
+              </h3>
+              <p style={{ margin: "0 0 var(--spacing-3)", fontSize: "0.9rem" }}>
+                Try saying a reference like "John 3:3".
+              </p>
+
+              {modelLoadingProgress && activeTest === "scripture" && (
+                <div
+                  style={{
+                    padding: "var(--spacing-3)",
+                    background: "var(--surface-2)",
+                    borderRadius: "8px",
+                    border: "1px solid var(--app-border-color)",
+                    marginBottom: "var(--spacing-3)",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginBottom: "var(--spacing-2)",
+                    }}
+                  >
+                    <span style={{ fontWeight: 600, color: "var(--app-text-color)" }}>
+                      Loading model
+                    </span>
+                    <span style={{ fontSize: "0.9rem", color: "var(--app-text-color-secondary)" }}>
+                      {Math.round(modelLoadingProgress.progress)}%
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      width: "100%",
+                      height: "8px",
+                      background: "var(--app-border-color)",
+                      borderRadius: "4px",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${modelLoadingProgress.progress}%`,
+                        height: "100%",
+                        background: "var(--onboarding-gradient-primary)",
+                        borderRadius: "4px",
+                        transition: "width 0.3s ease",
+                      }}
+                    />
+                  </div>
+                  <div
+                    style={{
+                      marginTop: "var(--spacing-2)",
+                      fontSize: "0.85rem",
+                      color: "var(--app-text-color-secondary)",
+                    }}
+                  >
+                    {modelLoadingProgress.stage}
+                  </div>
+                </div>
+              )}
+
+              {activeTest === "scripture" ? (
+                <button
+                  onClick={stopActiveTest}
+                  className="onboarding-button onboarding-button-secondary"
+                  style={{ display: "flex", alignItems: "center", gap: "8px" }}
+                >
+                  <FaStop />
+                  Stop test
+                </button>
+              ) : (
+                <button
+                  onClick={() => startTest("scripture")}
+                  className="onboarding-button onboarding-button-primary"
+                  style={{ display: "flex", alignItems: "center", gap: "8px" }}
+                >
+                  <FaPlay />
+                  {scriptureResult ? "Retest" : "Start test"}
+                </button>
+              )}
+
+              {listening && activeTest === "scripture" && !modelLoadingProgress && (
+                <div className="onboarding-message onboarding-message-info">
+                  <span className="onboarding-spinner"></span>
+                  Listening for scripture...
+                </div>
+              )}
+
+              {activeTest === "scripture" &&
+                (transcriptLines.length > 0 || interimTranscript) && (
+                  <div className="onboarding-message onboarding-message-info">
+                    <div style={{ display: "grid", gap: "6px" }}>
+                      {transcriptLines.map((line, index) => (
+                        <div
+                          key={`${index}-${line.slice(0, 8)}`}
+                          style={{ fontSize: "0.9rem", color: "var(--onboarding-text-secondary)" }}
+                        >
+                          {line}
+                        </div>
+                      ))}
+                      {interimTranscript && (
+                        <div style={{ fontSize: "0.9rem", fontStyle: "italic" }}>
+                          {interimTranscript}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+              {scriptureResult && (
+                <div
+                  style={{
+                    marginTop: "var(--spacing-3)",
+                    padding: "var(--spacing-3)",
+                    borderRadius: "8px",
+                    background: "var(--surface-3)",
+                    border: "1px solid var(--app-border-color)",
+                  }}
+                >
+                  <strong style={{ color: "var(--app-primary-color)" }}>
+                    {scriptureResult.displayRef}
+                  </strong>
+                  <p style={{ margin: "8px 0 0" }}>{scriptureResult.verseText}</p>
+                </div>
+              )}
+            </div>
+
+            {/* Paraphrase Detection */}
+            <div style={cardStyle}>
+              <h3 style={{ margin: "0 0 var(--spacing-3)" }}>
+                Paraphrase detection test
+                {paraphraseResult && (
+                  <FaCheck style={{ marginLeft: "8px", color: "var(--success)" }} />
+                )}
+              </h3>
+
+              {latestSettings.paraphraseDetectionMode === "offline" ? (
+                <div className="onboarding-message onboarding-message-info">
+                  Offline Search (Experimental) is enabled. Accuracy is currently
+                  low, but you can still run the paraphrase test.
+                </div>
+              ) : !aiProviderAvailable ? (
+                <div className="onboarding-message onboarding-message-warning">
+                  For paraphrase detection with AI Search, you need a configured
+                  For paraphrase detection with AI Search, you need a configured
+                  AI provider (Groq/OpenRouter). You can set this up later in
+                  Settings.
+                </div>
+              ) : null}
+
+              {(latestSettings.paraphraseDetectionMode === "offline" ||
+                aiProviderAvailable) && (
+                <>
+                  {latestSettings.paraphraseDetectionMode === "offline" ? (
+                    <p style={{ margin: "0 0 var(--spacing-2)", fontSize: "0.85rem", color: "var(--onboarding-text-secondary)" }}>
+                      Using: Offline Search (Experimental)
+                    </p>
+                  ) : aiProviderAvailable ? (
+                    <p style={{ margin: "0 0 var(--spacing-2)", fontSize: "0.85rem" }}>
+                      Using AI provider: {aiProviderLabel || "Configured provider"}
+                    </p>
+                  ) : null}
+                  <p style={{ margin: "0 0 var(--spacing-3)", fontSize: "0.9rem" }}>
+                    Try saying: "For God so loved the world, that he gave his only begotten Son."
+                  </p>
+
+                  {activeTest === "paraphrase" ? (
+                    <button
+                      onClick={stopActiveTest}
+                      className="onboarding-button onboarding-button-secondary"
+                      style={{ display: "flex", alignItems: "center", gap: "8px" }}
+                    >
+                      <FaStop />
+                      Stop test
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => startTest("paraphrase")}
+                      className="onboarding-button onboarding-button-primary"
+                      style={{ display: "flex", alignItems: "center", gap: "8px" }}
+                      disabled={
+                        latestSettings.paraphraseDetectionMode !== "offline" &&
+                        !aiProviderAvailable
+                      }
+                    >
+                      <FaPlay />
+                      {paraphraseResult ? "Retest" : "Start test"}
+                    </button>
+                  )}
+
+                  {listening && activeTest === "paraphrase" && (
+                    <div className="onboarding-message onboarding-message-info">
+                      <span className="onboarding-spinner"></span>
+                      Listening for paraphrase...
+                    </div>
+                  )}
+
+                  {activeTest === "paraphrase" &&
+                    (transcriptLines.length > 0 || interimTranscript) && (
+                      <div className="onboarding-message onboarding-message-info">
+                        <div style={{ display: "grid", gap: "6px" }}>
+                          {transcriptLines.map((line, index) => (
+                            <div
+                              key={`${index}-${line.slice(0, 8)}`}
+                              style={{ fontSize: "0.9rem", color: "var(--onboarding-text-secondary)" }}
+                            >
+                              {line}
+                            </div>
+                          ))}
+                          {interimTranscript && (
+                            <div style={{ fontSize: "0.9rem", fontStyle: "italic" }}>
+                              {interimTranscript}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                </>
+              )}
+
+              {paraphraseResult && (
+                <div
+                  style={{
+                    marginTop: "var(--spacing-3)",
+                    padding: "var(--spacing-3)",
+                    borderRadius: "8px",
+                    background: "var(--surface-3)",
+                    border: "1px solid var(--app-border-color)",
+                  }}
+                >
+                  <strong style={{ color: "var(--app-primary-color)" }}>
+                    {paraphraseResult.displayRef}
+                  </strong>
+                  <p style={{ margin: "8px 0 0" }}>{paraphraseResult.verseText}</p>
+                </div>
+              )}
+            </div>
+
+            {/* Keypoint Extraction */}
+            <div style={cardStyle}>
+              <h3 style={{ margin: "0 0 var(--spacing-3)" }}>
+                Key point extraction test
+                {keypointResult && (
+                  <FaCheck style={{ marginLeft: "8px", color: "var(--success)" }} />
+                )}
+              </h3>
+
+              {latestSettings.bibleSearchProvider === "offline" && !aiProviderAvailable && (
+                <div className="onboarding-message onboarding-message-warning">
+                  Key point extraction requires AI Search. Offline Search
+                  (Experimental) does not support key points. Please configure an AI provider
+                  in Settings → AI Configuration to use key point extraction.
+                </div>
+              )}
+
+              {!aiProviderAvailable && latestSettings.bibleSearchProvider !== "offline" && (
+                <div className="onboarding-message onboarding-message-warning">
+                  For key point extraction, you need a configured AI provider.
+                  You can set this up later in Settings.
+                </div>
+              )}
+
+              {latestSettings.bibleSearchProvider === "offline" && aiProviderAvailable && (
+                <div className="onboarding-message onboarding-message-info">
+                  Using default AI provider ({aiProviderLabel || "configured provider"}) for key point extraction.
+                  Offline Search (Experimental) is only used for Bible search, not key point extraction.
+                </div>
+              )}
+
+              {aiProviderAvailable && (
+                <>
+                  <p style={{ margin: "0 0 var(--spacing-3)", fontSize: "0.9rem" }}>
+                    Read this example aloud:
+                    <span style={{ display: "block", marginTop: "6px", fontStyle: "italic" }}>
+                      "Let me tell you something today. For there to be greatness outside of you, there has to be greatness inside of you."
+                    </span>
+                  </p>
+
+                  {activeTest === "keypoint" ? (
+                    <button
+                      onClick={stopActiveTest}
+                      className="onboarding-button onboarding-button-secondary"
+                      style={{ display: "flex", alignItems: "center", gap: "8px" }}
+                    >
+                      <FaStop />
+                      Stop test
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => startTest("keypoint")}
+                      className="onboarding-button onboarding-button-primary"
+                      style={{ display: "flex", alignItems: "center", gap: "8px" }}
+                      disabled={!aiProviderAvailable}
+                    >
+                      <FaPlay />
+                      {keypointResult ? "Retest" : "Start test"}
+                    </button>
+                  )}
+
+                  {listening && activeTest === "keypoint" && (
+                    <div className="onboarding-message onboarding-message-info">
+                      <span className="onboarding-spinner"></span>
+                      Listening for key points...
+                    </div>
+                  )}
+
+                  {activeTest === "keypoint" &&
+                    (transcriptLines.length > 0 || interimTranscript) && (
+                      <div className="onboarding-message onboarding-message-info">
+                        <div style={{ display: "grid", gap: "6px" }}>
+                          {transcriptLines.map((line, index) => (
+                            <div
+                              key={`${index}-${line.slice(0, 8)}`}
+                              style={{ fontSize: "0.9rem", color: "var(--onboarding-text-secondary)" }}
+                            >
+                              {line}
+                            </div>
+                          ))}
+                          {interimTranscript && (
+                            <div style={{ fontSize: "0.9rem", fontStyle: "italic" }}>
+                              {interimTranscript}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                </>
+              )}
+
+              {keypointResult && (
+                <div
+                  style={{
+                    marginTop: "var(--spacing-3)",
+                    padding: "var(--spacing-3)",
+                    borderRadius: "8px",
+                    background: "var(--surface-3)",
+                    border: "1px solid var(--app-border-color)",
+                  }}
+                >
+                  <strong style={{ color: "var(--app-primary-color)" }}>
+                    Detected key point
+                  </strong>
+                  <p style={{ margin: "8px 0 0" }}>{keypointResult.text}</p>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {error && (
+          <div className="onboarding-message onboarding-message-error">
+            {error}
+          </div>
+        )}
+
+        <p className="onboarding-help-text">
+          You can run more comprehensive tests from the Smart Verses page after
+          onboarding.
+        </p>
+
+        <div className="onboarding-buttons">
+          <button
+            onClick={onNext}
+            className="onboarding-button onboarding-button-primary"
+          >
+            Done
+          </button>
+          <button
+            onClick={onBack}
+            className="onboarding-button onboarding-button-secondary"
+          >
+            Back
+          </button>
+          <button
+            onClick={onSkip}
+            className="onboarding-button onboarding-button-tertiary"
+          >
+            Skip for now
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default TestSmartVersesScreen;
